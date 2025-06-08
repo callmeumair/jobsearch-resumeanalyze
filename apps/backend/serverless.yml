@@ -8,12 +8,13 @@ provider:
   stage: ${opt:stage, 'dev'}
   region: ${opt:region, 'us-east-1'}
   environment:
-    MONGODB_URI: ${ssm:/jobsearch/${self:provider.stage}/mongodb-uri}
-    JWT_SECRET: ${ssm:/jobsearch/${self:provider.stage}/jwt-secret}
-    JWT_REFRESH_SECRET: ${ssm:/jobsearch/${self:provider.stage}/jwt-refresh-secret}
-    ELASTICSEARCH_URL: ${ssm:/jobsearch/${self:provider.stage}/elasticsearch-url}
-    RABBITMQ_URL: ${ssm:/jobsearch/${self:provider.stage}/rabbitmq-url}
-    RESUME_BUCKET: ${self:service}-resumes-${self:provider.stage}
+    MONGODB_URI: ${env:MONGODB_URI}
+    JWT_SECRET: ${env:JWT_SECRET}
+    JWT_REFRESH_SECRET: ${env:JWT_REFRESH_SECRET}
+    ELASTICSEARCH_URL: ${env:ELASTICSEARCH_URL}
+    RABBITMQ_URL: ${env:RABBITMQ_URL}
+    RESUME_BUCKET: ${self:service}-${self:provider.stage}-resumes
+    OPENAI_API_KEY: ${env:OPENAI_API_KEY}
   iam:
     role:
       statements:
@@ -22,13 +23,10 @@ provider:
             - s3:PutObject
             - s3:GetObject
             - s3:DeleteObject
-          Resource: 
-            - arn:aws:s3:::${self:provider.environment.RESUME_BUCKET}/*
-        - Effect: Allow
-          Action:
             - s3:ListBucket
-          Resource: 
+          Resource:
             - arn:aws:s3:::${self:provider.environment.RESUME_BUCKET}
+            - arn:aws:s3:::${self:provider.environment.RESUME_BUCKET}/*
 
 functions:
   auth:
@@ -46,14 +44,21 @@ functions:
           path: /api/resume/upload-url
           method: get
           cors: true
-          authorizer: auth
 
   resumeParser:
     handler: src/handlers/resumeParser.handler
     events:
       - sqs:
-          arn: !GetAtt ResumeParserQueue.Arn
+          arn: !GetAtt ResumeParseQueue.Arn
           batchSize: 1
+
+  resumeEnhancer:
+    handler: src/handlers/resumeEnhancer.handler
+    events:
+      - sqs:
+          arn: !GetAtt ResumeEnhanceQueue.Arn
+          batchSize: 1
+    timeout: 30 # OpenAI API calls might take longer
 
   jobSearch:
     handler: src/handlers/jobSearch.handler
@@ -62,16 +67,14 @@ functions:
           path: /api/jobs/search
           method: get
           cors: true
-          authorizer: auth
 
   graphql:
     handler: src/handlers/graphql.handler
     events:
       - http:
           path: /graphql
-          method: post
+          method: any
           cors: true
-          authorizer: auth
 
 plugins:
   - serverless-esbuild
@@ -100,35 +103,91 @@ resources:
               AllowedOrigins: ['*']
               MaxAge: 3000
 
-    ResumeParserQueue:
+    ResumeParseQueue:
       Type: AWS::SQS::Queue
       Properties:
-        QueueName: ${self:service}-resume-parser-${self:provider.stage}
-        VisibilityTimeout: 900
-        MessageRetentionPeriod: 1209600
+        QueueName: ${self:service}-${self:provider.stage}-parse-queue
+        VisibilityTimeout: 900 # 15 minutes
+        MessageRetentionPeriod: 1209600 # 14 days
 
-    ResumeParserQueuePolicy:
+    ResumeEnhanceQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-enhance-queue
+        VisibilityTimeout: 900 # 15 minutes
+        MessageRetentionPeriod: 1209600 # 14 days
+
+    ResumeParseQueuePolicy:
       Type: AWS::SQS::QueuePolicy
       Properties:
         Queues:
-          - !Ref ResumeParserQueue
+          - !Ref ResumeParseQueue
         PolicyDocument:
           Version: '2012-10-17'
           Statement:
             - Effect: Allow
               Principal:
-                Service: sns.amazonaws.com
+                Service: s3.amazonaws.com
               Action: sqs:SendMessage
-              Resource: !GetAtt ResumeParserQueue.Arn
+              Resource: !GetAtt ResumeParseQueue.Arn
+              Condition:
+                ArnLike:
+                  aws:SourceArn: !GetAtt ResumeBucket.Arn
 
-    ResumeParserTopic:
+    ResumeEnhanceQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - !Ref ResumeEnhanceQueue
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sqs:SendMessage
+              Resource: !GetAtt ResumeEnhanceQueue.Arn
+              Condition:
+                ArnLike:
+                  aws:SourceArn: !GetAtt ResumeParserFunction.Arn
+
+    ResumeParserFunction:
+      Type: AWS::Lambda::Function
+      Properties:
+        FunctionName: ${self:service}-${self:provider.stage}-resume-parser
+        Handler: src/handlers/resumeParser.handler
+        Role: !GetAtt ResumeParserRole.Arn
+
+    ResumeParserRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        Policies:
+          - PolicyName: ResumeParserPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - sqs:SendMessage
+                  Resource: !GetAtt ResumeEnhanceQueue.Arn
+
+    ResumeNotificationTopic:
       Type: AWS::SNS::Topic
       Properties:
-        TopicName: ${self:service}-resume-parser-${self:provider.stage}
+        TopicName: ${self:service}-${self:provider.stage}-notifications
 
-    ResumeParserTopicSubscription:
+    ResumeNotificationSubscription:
       Type: AWS::SNS::Subscription
       Properties:
-        TopicArn: !Ref ResumeParserTopic
-        Protocol: sqs
-        Endpoint: !GetAtt ResumeParserQueue.Arn 
+        TopicArn: !Ref ResumeNotificationTopic
+        Protocol: email
+        Endpoint: ${env:NOTIFICATION_EMAIL} 
