@@ -1,7 +1,8 @@
-import { parse } from 'pdf-parse';
+import pdfParse from 'pdf-parse';
 import { parseResume as parseResumeFile } from 'resume-parser';
 import { Experience, Education } from '@jobsearch-resumeanalyze/types';
 import { Readable } from 'stream';
+import { log } from './logger';
 
 interface ParsedResume {
   skills?: string[];
@@ -21,53 +22,92 @@ interface ParsedResume {
   summary?: string;
 }
 
-export const parseResume = async (
-  fileStream: Readable | Buffer,
-  fileType: string = 'pdf'
-): Promise<ParsedResume> => {
+export const parseResume = async (fileStream: Readable, fileType: string) => {
   try {
-    // Convert stream to buffer if needed
-    let buffer: Buffer;
-    if (fileStream instanceof Buffer) {
-      buffer = fileStream;
+    let text = '';
+
+    if (fileType === 'application/pdf') {
+      const buffer = await streamToBuffer(fileStream);
+      const data = await pdfParse(buffer);
+      text = data.text;
+    } else if (fileType === 'application/msword' || fileType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+      // Handle DOC/DOCX files
+      // You might want to use a library like mammoth or docx for this
+      throw new Error('DOC/DOCX parsing not implemented yet');
     } else {
-      const chunks: Uint8Array[] = [];
-      for await (const chunk of fileStream) {
-        chunks.push(chunk);
-      }
-      buffer = Buffer.concat(chunks);
+      throw new Error(`Unsupported file type: ${fileType}`);
     }
 
-    // Parse resume
-    const result = await parseResumeFile(buffer, fileType);
-
-    // Extract and structure the data
-    const parsedData: ParsedResume = {
-      skills: result.skills || [],
-      experience: result.work?.map((work) => ({
-        title: work.title || '',
-        company: work.company || '',
-        description: work.description || '',
-        startDate: work.startDate || '',
-        endDate: work.endDate,
-      })),
-      education: result.education?.map((edu) => ({
-        degree: edu.degree || '',
-        institution: edu.school || '',
-        field: edu.fieldOfStudy || '',
-        graduationDate: edu.endDate || '',
-      })),
+    // Basic parsing logic
+    const sections = text.split(/\n\s*\n/);
+    const parsedData = {
+      name: '',
+      email: '',
+      phone: '',
+      summary: '',
+      experience: [] as Array<{ company: string; title: string; duration: string; description: string }>,
+      education: [] as Array<{ institution: string; degree: string; year: string }>,
+      skills: [] as string[],
     };
 
-    // Extract summary (first paragraph or section)
-    const summary = extractSummary(result.text);
-    parsedData.summary = summary;
+    // Extract basic information
+    const emailRegex = /[\w.-]+@[\w.-]+\.\w+/;
+    const phoneRegex = /(?:\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/;
+
+    for (const section of sections) {
+      const lines = section.split('\n').map(line => line.trim()).filter(Boolean);
+      if (lines.length === 0) continue;
+
+      // Try to find email and phone
+      const emailMatch = section.match(emailRegex);
+      if (emailMatch) parsedData.email = emailMatch[0];
+
+      const phoneMatch = section.match(phoneRegex);
+      if (phoneMatch) parsedData.phone = phoneMatch[0];
+
+      // Simple section detection
+      const firstLine = lines[0].toLowerCase();
+      if (firstLine.includes('experience') || firstLine.includes('work')) {
+        // Parse experience section
+        // This is a very basic implementation
+        const experience = {
+          company: lines[1] || '',
+          title: lines[2] || '',
+          duration: lines[3] || '',
+          description: lines.slice(4).join(' '),
+        };
+        parsedData.experience.push(experience);
+      } else if (firstLine.includes('education')) {
+        // Parse education section
+        const education = {
+          institution: lines[1] || '',
+          degree: lines[2] || '',
+          year: lines[3] || '',
+        };
+        parsedData.education.push(education);
+      } else if (firstLine.includes('skills')) {
+        // Parse skills section
+        parsedData.skills = lines.slice(1).join(' ').split(/[,;]/).map(skill => skill.trim());
+      } else if (!parsedData.name && lines.length > 0) {
+        // Assume the first non-empty section is the name
+        parsedData.name = lines[0];
+      }
+    }
 
     return parsedData;
   } catch (error) {
-    console.error('Error parsing resume:', error);
-    throw new Error('Failed to parse resume');
+    log.error('Error parsing resume', error as Error);
+    throw error;
   }
+};
+
+const streamToBuffer = async (stream: Readable): Promise<Buffer> => {
+  const chunks: Buffer[] = [];
+  return new Promise((resolve, reject) => {
+    stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+    stream.on('error', (err) => reject(err));
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+  });
 };
 
 const extractSkills = (text: string): string[] => {

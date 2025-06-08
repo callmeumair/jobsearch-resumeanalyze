@@ -1,88 +1,93 @@
 import mongoose from 'mongoose';
-import { Resume } from '@jobsearch-resumeanalyze/types';
 
-const experienceSchema = new mongoose.Schema({
-  company: {
+export interface IResume {
+  userId: mongoose.Types.ObjectId;
+  originalFile: string;
+  parsedFile?: string;
+  status: 'PENDING' | 'PARSING' | 'PARSED' | 'ENHANCING' | 'ENHANCED' | 'FAILED';
+  parsedData?: {
+    name?: string;
+    email?: string;
+    phone?: string;
+    summary?: string;
+    experience?: Array<{
+      company: string;
+      title: string;
+      duration: string;
+      description: string;
+    }>;
+    education?: Array<{
+      institution: string;
+      degree: string;
+      year: string;
+    }>;
+    skills?: string[];
+  };
+  enhancedData?: {
+    summary?: string;
+    experience?: Array<{
+      company: string;
+      title: string;
+      duration: string;
+      description: string;
+      enhancedDescription: string;
+    }>;
+    skills?: Array<{
+      name: string;
+      level: string;
+      category: string;
+    }>;
+  };
+  error?: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const resumeSchema = new mongoose.Schema<IResume>({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  originalFile: { type: String, required: true },
+  parsedFile: String,
+  status: {
     type: String,
-    required: true,
+    enum: ['PENDING', 'PARSING', 'PARSED', 'ENHANCING', 'ENHANCED', 'FAILED'],
+    default: 'PENDING',
   },
-  title: {
-    type: String,
-    required: true,
+  parsedData: {
+    name: String,
+    email: String,
+    phone: String,
+    summary: String,
+    experience: [{
+      company: String,
+      title: String,
+      duration: String,
+      description: String,
+    }],
+    education: [{
+      institution: String,
+      degree: String,
+      year: String,
+    }],
+    skills: [String],
   },
-  startDate: {
-    type: Date,
-    required: true,
+  enhancedData: {
+    summary: String,
+    experience: [{
+      company: String,
+      title: String,
+      duration: String,
+      description: String,
+      enhancedDescription: String,
+    }],
+    skills: [{
+      name: String,
+      level: String,
+      category: String,
+    }],
   },
-  endDate: Date,
-  description: String,
-  skills: [String],
+  error: String,
+}, {
+  timestamps: true,
 });
 
-const educationSchema = new mongoose.Schema({
-  institution: {
-    type: String,
-    required: true,
-  },
-  degree: {
-    type: String,
-    required: true,
-  },
-  field: {
-    type: String,
-    required: true,
-  },
-  startDate: {
-    type: Date,
-    required: true,
-  },
-  endDate: Date,
-  gpa: Number,
-});
-
-const resumeSchema = new mongoose.Schema<Resume>(
-  {
-    userId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: true,
-    },
-    fileName: {
-      type: String,
-      required: true,
-    },
-    fileUrl: {
-      type: String,
-      required: true,
-    },
-    fileType: {
-      type: String,
-      required: true,
-    },
-    fileSize: {
-      type: Number,
-      required: true,
-    },
-    status: {
-      type: String,
-      enum: ['pending', 'processing', 'completed', 'failed'],
-      default: 'pending',
-    },
-    metadata: {
-      skills: [String],
-      experience: [experienceSchema],
-      education: [educationSchema],
-      summary: String,
-    },
-  },
-  {
-    timestamps: true,
-  }
-);
-
-// Indexes
-resumeSchema.index({ userId: 1 });
-resumeSchema.index({ status: 1 });
-resumeSchema.index({ 'metadata.skills': 1 });
-
-export const ResumeModel = mongoose.model<Resume>('Resume', resumeSchema); 
+export const Resume = mongoose.model<IResume>('Resume', resumeSchema); 

@@ -1,13 +1,14 @@
 import winston from 'winston';
 import * as Sentry from '@sentry/node';
-import { ProfilingIntegration } from '@sentry/profiling-node';
+import { nodeProfilingIntegration } from '@sentry/profiling-node';
+import Transport from 'winston-transport';
 
 // Initialize Sentry
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
   environment: process.env.NODE_ENV || 'development',
   integrations: [
-    new ProfilingIntegration(),
+    nodeProfilingIntegration(),
   ],
   tracesSampleRate: 1.0,
   profilesSampleRate: 1.0,
@@ -32,7 +33,11 @@ const logger = winston.createLogger({
 });
 
 // Add Sentry transport for error logging
-class SentryTransport extends winston.Transport {
+class SentryTransport extends Transport {
+  constructor(opts?: Transport.TransportStreamOptions) {
+    super(opts);
+  }
+
   log(info: any, callback: () => void) {
     setImmediate(() => {
       this.emit('logged', info);

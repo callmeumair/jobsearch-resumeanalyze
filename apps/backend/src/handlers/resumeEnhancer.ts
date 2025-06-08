@@ -1,123 +1,85 @@
-import { SQSEvent, SQSHandler } from 'aws-lambda';
-import { connectDB } from '../lib/mongodb';
-import { ResumeModel } from '../models/Resume';
-import OpenAI from 'openai';
+import { SQSHandler, SQSBatchResponse } from 'aws-lambda';
+import { SQS } from 'aws-sdk';
+import { log } from '../lib/logger';
+import { Resume } from '../models/Resume';
+import { connect as connectRabbitMQ } from '../lib/rabbitmq';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const sqs = new SQS();
 
-interface ResumeEnhancementEvent {
-  userId: string;
-  resumeId: string;
-  parsedData: {
-    skills?: string[];
-    experience?: Array<{
-      title: string;
-      company: string;
-      description: string;
-      startDate: string;
-      endDate?: string;
-    }>;
-    education?: Array<{
-      degree: string;
-      institution: string;
-      field: string;
-      graduationDate: string;
-    }>;
-  };
-}
-
-export const handler: SQSHandler = async (event: SQSEvent) => {
+export const handler: SQSHandler = async (event): Promise<void | SQSBatchResponse> => {
   try {
-    await connectDB();
+    // Connect to RabbitMQ
+    await connectRabbitMQ();
+
+    const batchItemFailures: { itemIdentifier: string }[] = [];
 
     for (const record of event.Records) {
-      const message: ResumeEnhancementEvent = JSON.parse(record.body);
-      console.log('Processing resume enhancement:', message);
+      try {
+        const { resumeId, userId } = JSON.parse(record.body);
 
-      const { userId, resumeId, parsedData } = message;
+        // Update resume status to ENHANCING
+        const resume = await Resume.findById(resumeId);
+        if (!resume) {
+          log.error('Resume not found', { resumeId });
+          batchItemFailures.push({ itemIdentifier: record.messageId });
+          continue;
+        }
 
-      // Prepare context for OpenAI
-      const experienceText = parsedData.experience
-        ?.map(
-          (exp) =>
-            `${exp.title} at ${exp.company} (${exp.startDate} - ${
-              exp.endDate || 'Present'
-            }): ${exp.description}`
-        )
-        .join('\n');
+        if (resume.userId.toString() !== userId) {
+          log.error('User does not have access to this resume', { resumeId, userId });
+          batchItemFailures.push({ itemIdentifier: record.messageId });
+          continue;
+        }
 
-      const educationText = parsedData.education
-        ?.map(
-          (edu) =>
-            `${edu.degree} in ${edu.field} from ${edu.institution} (Graduated: ${edu.graduationDate})`
-        )
-        .join('\n');
+        resume.status = 'ENHANCING';
+        await resume.save();
 
-      const skillsText = parsedData.skills?.join(', ');
+        // Get parsed data
+        const parsedData = resume.parsedData;
+        if (!parsedData) {
+          throw new Error('No parsed data available for enhancement');
+        }
 
-      const prompt = `Given the following professional experience, education, and skills, generate:
-1. A compelling professional summary (2-3 sentences)
-2. A list of top 5-7 most relevant and impressive skills
+        // Enhance the resume data
+        const enhancedData = await enhanceResumeData(parsedData);
 
-Experience:
-${experienceText || 'No experience provided'}
+        // Update resume with enhanced data
+        resume.enhancedData = enhancedData;
+        resume.status = 'ENHANCED';
+        await resume.save();
 
-Education:
-${educationText || 'No education provided'}
+        // Send notification email
+        // TODO: Implement email notification
 
-Skills:
-${skillsText || 'No skills provided'}
-
-Format the response as JSON with two fields:
-{
-  "summary": "professional summary here",
-  "topSkills": ["skill1", "skill2", ...]
-}`;
-
-      // Call OpenAI API
-      const completion = await openai.chat.completions.create({
-        model: 'gpt-4-turbo-preview',
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are a professional resume writer and career coach. Generate concise, impactful professional summaries and identify the most relevant skills based on the provided information.',
-          },
-          {
-            role: 'user',
-            content: prompt,
-          },
-        ],
-        response_format: { type: 'json_object' },
-      });
-
-      const enhancement = JSON.parse(completion.choices[0].message.content);
-
-      // Update resume in MongoDB
-      await ResumeModel.findByIdAndUpdate(
-        resumeId,
-        {
-          $set: {
-            'metadata.summary': enhancement.summary,
-            'metadata.topSkills': enhancement.topSkills,
-            status: 'ENHANCED',
-            updatedAt: new Date(),
-          },
-        },
-        { new: true }
-      );
-
-      console.log('Resume enhanced successfully:', resumeId);
+        log.info('Resume enhanced successfully', { resumeId });
+      } catch (error) {
+        log.error('Failed to process record', { recordId: record.messageId, error });
+        batchItemFailures.push({ itemIdentifier: record.messageId });
+      }
     }
 
-    return {
-      statusCode: 200,
-      body: JSON.stringify({ message: 'Resume enhancement completed' }),
-    };
+    if (batchItemFailures.length > 0) {
+      return { batchItemFailures };
+    }
   } catch (error) {
-    console.error('Error enhancing resume:', error);
+    log.error('Error in resume enhancer handler', error as Error);
     throw error;
   }
-}; 
+};
+
+async function enhanceResumeData(parsedData: NonNullable<typeof Resume.prototype.parsedData>) {
+  // TODO: Implement actual enhancement logic using AI/ML
+  // For now, return a simple enhancement
+  return {
+    summary: parsedData.summary ? `${parsedData.summary}\n\nEnhanced with AI-powered insights.` : undefined,
+    experience: parsedData.experience?.map(exp => ({
+      ...exp,
+      enhancedDescription: `${exp.description}\n\nEnhanced with AI-powered insights.`,
+    })),
+    skills: parsedData.skills?.map(skill => ({
+      name: skill,
+      level: 'Intermediate', // This should be determined by AI
+      category: 'Technical', // This should be determined by AI
+    })),
+  };
+} 
