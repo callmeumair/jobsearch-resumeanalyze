@@ -1,0 +1,134 @@
+service: jobsearch-resumeanalyze-backend
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+  environment:
+    MONGODB_URI: ${ssm:/jobsearch/${self:provider.stage}/mongodb-uri}
+    JWT_SECRET: ${ssm:/jobsearch/${self:provider.stage}/jwt-secret}
+    JWT_REFRESH_SECRET: ${ssm:/jobsearch/${self:provider.stage}/jwt-refresh-secret}
+    ELASTICSEARCH_URL: ${ssm:/jobsearch/${self:provider.stage}/elasticsearch-url}
+    RABBITMQ_URL: ${ssm:/jobsearch/${self:provider.stage}/rabbitmq-url}
+    RESUME_BUCKET: ${self:service}-resumes-${self:provider.stage}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:DeleteObject
+          Resource: 
+            - arn:aws:s3:::${self:provider.environment.RESUME_BUCKET}/*
+        - Effect: Allow
+          Action:
+            - s3:ListBucket
+          Resource: 
+            - arn:aws:s3:::${self:provider.environment.RESUME_BUCKET}
+
+functions:
+  auth:
+    handler: src/handlers/auth.handler
+    events:
+      - http:
+          path: /auth/{proxy+}
+          method: any
+          cors: true
+
+  presignedUrl:
+    handler: src/handlers/presignedUrl.handler
+    events:
+      - http:
+          path: /api/resume/upload-url
+          method: get
+          cors: true
+          authorizer: auth
+
+  resumeParser:
+    handler: src/handlers/resumeParser.handler
+    events:
+      - sqs:
+          arn: !GetAtt ResumeParserQueue.Arn
+          batchSize: 1
+
+  jobSearch:
+    handler: src/handlers/jobSearch.handler
+    events:
+      - http:
+          path: /api/jobs/search
+          method: get
+          cors: true
+          authorizer: auth
+
+  graphql:
+    handler: src/handlers/graphql.handler
+    events:
+      - http:
+          path: /graphql
+          method: post
+          cors: true
+          authorizer: auth
+
+plugins:
+  - serverless-esbuild
+  - serverless-offline
+
+custom:
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    exclude: ['aws-sdk']
+    target: 'node18'
+    platform: 'node'
+    concurrency: 10
+
+resources:
+  Resources:
+    ResumeBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.RESUME_BUCKET}
+        CorsConfiguration:
+          CorsRules:
+            - AllowedHeaders: ['*']
+              AllowedMethods: [GET, PUT, POST, DELETE]
+              AllowedOrigins: ['*']
+              MaxAge: 3000
+
+    ResumeParserQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-resume-parser-${self:provider.stage}
+        VisibilityTimeout: 900
+        MessageRetentionPeriod: 1209600
+
+    ResumeParserQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - !Ref ResumeParserQueue
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: sns.amazonaws.com
+              Action: sqs:SendMessage
+              Resource: !GetAtt ResumeParserQueue.Arn
+
+    ResumeParserTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${self:service}-resume-parser-${self:provider.stage}
+
+    ResumeParserTopicSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn: !Ref ResumeParserTopic
+        Protocol: sqs
+        Endpoint: !GetAtt ResumeParserQueue.Arn 
