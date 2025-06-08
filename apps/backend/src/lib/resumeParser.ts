@@ -1,58 +1,71 @@
 import { parse } from 'pdf-parse';
-import { ResumeParser } from 'resume-parser';
+import { parseResume as parseResumeFile } from 'resume-parser';
 import { Experience, Education } from '@jobsearch-resumeanalyze/types';
+import { Readable } from 'stream';
 
 interface ParsedResume {
-  skills: string[];
-  experience: Experience[];
-  education: Education[];
+  skills?: string[];
+  experience?: Array<{
+    title: string;
+    company: string;
+    description: string;
+    startDate: string;
+    endDate?: string;
+  }>;
+  education?: Array<{
+    degree: string;
+    institution: string;
+    field: string;
+    graduationDate: string;
+  }>;
   summary?: string;
 }
 
 export const parseResume = async (
-  buffer: Buffer,
-  contentType: string | undefined
+  fileStream: Readable | Buffer,
+  fileType: string = 'pdf'
 ): Promise<ParsedResume> => {
   try {
-    let text: string;
-    let parsedData: any;
-
-    if (contentType === 'application/pdf') {
-      // Parse PDF
-      const pdfData = await parse(buffer);
-      text = pdfData.text;
-      parsedData = pdfData;
+    // Convert stream to buffer if needed
+    let buffer: Buffer;
+    if (fileStream instanceof Buffer) {
+      buffer = fileStream;
     } else {
-      // Parse DOC/DOCX using resume-parser
-      parsedData = await new Promise((resolve, reject) => {
-        ResumeParser.parseResumeFile(buffer, (err, data) => {
-          if (err) reject(err);
-          else resolve(data);
-        });
-      });
-      text = parsedData.text;
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of fileStream) {
+        chunks.push(chunk);
+      }
+      buffer = Buffer.concat(chunks);
     }
 
-    // Extract skills (basic implementation - can be enhanced with NLP)
-    const skills = extractSkills(text);
+    // Parse resume
+    const result = await parseResumeFile(buffer, fileType);
 
-    // Extract experience
-    const experience = extractExperience(text);
-
-    // Extract education
-    const education = extractEducation(text);
+    // Extract and structure the data
+    const parsedData: ParsedResume = {
+      skills: result.skills || [],
+      experience: result.work?.map((work) => ({
+        title: work.title || '',
+        company: work.company || '',
+        description: work.description || '',
+        startDate: work.startDate || '',
+        endDate: work.endDate,
+      })),
+      education: result.education?.map((edu) => ({
+        degree: edu.degree || '',
+        institution: edu.school || '',
+        field: edu.fieldOfStudy || '',
+        graduationDate: edu.endDate || '',
+      })),
+    };
 
     // Extract summary (first paragraph or section)
-    const summary = extractSummary(text);
+    const summary = extractSummary(result.text);
+    parsedData.summary = summary;
 
-    return {
-      skills,
-      experience,
-      education,
-      summary,
-    };
+    return parsedData;
   } catch (error) {
-    console.error('Resume parsing error:', error);
+    console.error('Error parsing resume:', error);
     throw new Error('Failed to parse resume');
   }
 };

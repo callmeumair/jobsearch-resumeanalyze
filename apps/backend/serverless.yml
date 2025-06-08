@@ -15,6 +15,8 @@ provider:
     RABBITMQ_URL: ${env:RABBITMQ_URL}
     RESUME_BUCKET: ${self:service}-${self:provider.stage}-resumes
     OPENAI_API_KEY: ${env:OPENAI_API_KEY}
+    RESUME_ENHANCE_QUEUE_URL: !Ref ResumeEnhanceQueue
+    RESUME_NOTIFICATION_TOPIC_ARN: !Ref ResumeNotificationTopic
   iam:
     role:
       statements:
@@ -27,6 +29,19 @@ provider:
           Resource:
             - arn:aws:s3:::${self:provider.environment.RESUME_BUCKET}
             - arn:aws:s3:::${self:provider.environment.RESUME_BUCKET}/*
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueAttributes
+          Resource:
+            - !GetAtt ResumeParseQueue.Arn
+            - !GetAtt ResumeEnhanceQueue.Arn
+        - Effect: Allow
+          Action:
+            - sns:Publish
+          Resource: !Ref ResumeNotificationTopic
 
 functions:
   auth:
@@ -75,6 +90,52 @@ functions:
           path: /graphql
           method: any
           cors: true
+
+  # Admin API endpoints
+  adminListJobs:
+    handler: src/handlers/admin.listJobs
+    events:
+      - http:
+          path: /admin/jobs
+          method: get
+          cors: true
+          authorizer: auth
+
+  adminCreateJob:
+    handler: src/handlers/admin.createJob
+    events:
+      - http:
+          path: /admin/jobs
+          method: post
+          cors: true
+          authorizer: auth
+
+  adminUpdateJob:
+    handler: src/handlers/admin.updateJob
+    events:
+      - http:
+          path: /admin/jobs/{jobId}
+          method: put
+          cors: true
+          authorizer: auth
+
+  adminDeleteJob:
+    handler: src/handlers/admin.deleteJob
+    events:
+      - http:
+          path: /admin/jobs/{jobId}
+          method: delete
+          cors: true
+          authorizer: auth
+
+  adminDashboardStats:
+    handler: src/handlers/admin.getDashboardStats
+    events:
+      - http:
+          path: /admin/dashboard/stats
+          method: get
+          cors: true
+          authorizer: auth
 
 plugins:
   - serverless-esbuild
